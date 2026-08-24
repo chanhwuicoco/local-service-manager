@@ -1,0 +1,889 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #1e1e1e;
+  color: #ddd;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+/* 숫자 입력 스피너(▲▼) 제거: 포트, Start All 간격 등 모든 number 입력 공통 */
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+button {
+  background: #333;
+  color: #ddd;
+  border: 1px solid #444;
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+button:hover {
+  background: #3d3d3d;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* ▶/⬇ 대비 ■(Stop) 글리프가 폰트 렌더링상 눈에 띄게 작게 보여서 별도 스케일업으로 시각적 크기를 맞춤 */
+.btn-icon {
+  display: inline-block;
+  font-size: 1em;
+  line-height: 1;
+}
+.btn-icon-stop {
+  font-size: 1.35em;
+}
+
+.app-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: #aaa;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* header */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: #252526;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+.header h1 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+}
+.header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.header-btn {
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.header-btn-text {
+  min-width: 92px; /* Start All/Stop All/Pull All 세 버튼 폭 통일 */
+}
+.header-btn-icon {
+  width: 26px;
+  padding: 0;
+}
+.settings-menu {
+  position: relative;
+}
+.settings-dropdown {
+  position: absolute;
+  right: 0;
+  top: 30px;
+  background: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+  min-width: 170px;
+  overflow: hidden;
+}
+.settings-dropdown button {
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 8px 10px;
+}
+.settings-dropdown button:hover {
+  background: #3d3d3d;
+}
+
+/* body: sidebar + main */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 230px; /* 기존 260px 대비 ~11.5% 축소 (2줄 카드 레이아웃 유지 가능한 선) */
+  flex-shrink: 0;
+  background: #232323;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.sidebar.collapsed {
+  width: 56px;
+}
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px 4px 10px;
+}
+.sidebar.collapsed .sidebar-header {
+  justify-content: center;
+  padding: 6px 0 4px;
+}
+.sidebar-title {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #888;
+}
+.sidebar-toggle {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 8px 8px;
+}
+.card-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 4px;
+  border: 1px solid transparent; /* 하이라이트 시 border 가 생겨도 레이아웃이 안 흔들리게 미리 자리 확보 */
+  transition: background-color 0.1s, border-color 0.1s;
+}
+.card-group.section-drop-target {
+  /* 섹션 드래그 중 이 그룹의 자리로 이동함을 명확히 표시(줄 인디케이터 없이 하이라이트만) */
+  background: rgba(74, 158, 255, 0.1);
+  border-color: #4a9eff;
+}
+.card-group-label {
+  cursor: grab;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #6a6a6a; /* SERVICES 타이틀(#888)보다 더 약한 muted 톤 */
+  padding: 4px 2px; /* 드래그 시작점으로 잡기 쉽게 세로 여유 확보(기존 0 2px 는 히트박스가 너무 좁았음) */
+}
+.card-group-label:hover {
+  cursor: grab; /* 그룹 전체가 항상 grab 이지만 hover 시에도 명시(요구사항) - 드래그 가능함을 재강조 */
+}
+
+.card-group-label.dragging {
+  opacity: 0.4;
+}
+/* 드래그 가능함을 보여주는 grip 아이콘(브라유 점자 6점 - WebView2/Chromium 기본 폰트 폴백에서 안정적으로 렌더). */
+.drag-handle {
+  font-size: 11px;
+  line-height: 1;
+  color: #555; /* 라벨 텍스트(#6a6a6a)보다 한 톤 더 muted - 보조 아이콘이라 텍스트보다 튀면 안 됨 */
+  flex-shrink: 0;
+}
+.card-drag-wrap {
+  display: flex;
+  flex-direction: column;
+}
+.card-drag-wrap.dragging {
+  opacity: 0.4;
+}
+/* 카드 DnD 도 섹션과 같은 슬롯 방식(자리 차지) - 삽입 라인 대신 대상 카드 전체를 하이라이트만 함. */
+.card-drag-wrap.drop-target .service-card {
+  border-color: #4a9eff;
+  background: rgba(74, 158, 255, 0.1);
+}
+
+/* 접힌 사이드바: 서비스별 세로 레일 */
+.rail-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 8px;
+}
+.rail-item {
+  width: 44px;
+  height: 40px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  position: relative;
+}
+.rail-item:hover {
+  border-color: #555;
+}
+.rail-item.selected {
+  border-color: #4a9eff;
+  background: #24344a;
+}
+.rail-item .status-emoji {
+  font-size: 10px;
+  line-height: 1;
+}
+.rail-initials {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  color: #ccc; /* 유형별 색 구분 없이 중립색 하나 - 유형 구분은 그룹 헤더가 담당 */
+}
+.rail-initials-3 {
+  font-size: 9.5px;
+  letter-spacing: 0;
+}
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.rail-group-divider {
+  width: 28px;
+  height: 1px;
+  background: #3a3a3a;
+  margin: 4px 0;
+}
+.rail-group-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #666; /* 펼침 모드 card-group-label(#6a6a6a)보다 좁은 폭에 맞춰 살짝 더 축약된 muted 톤 */
+  line-height: 1;
+}
+.rail-dot {
+  /* pull 대기(behind) 표시: "실행 중" 상태등처럼 오해되던 녹색 점 대신 작은 아래 화살표로 표시 */
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  font-size: 8px;
+  line-height: 1;
+  color: #5ec26a;
+  font-weight: 700;
+}
+
+/* 2줄 컴팩트 카드: 좌측 텍스트 2줄(main) + 우측 버튼 2x2 그리드(actions), 가로 한 행에 정렬 */
+.service-card {
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.service-card:hover {
+  border-color: #555;
+}
+.service-card.selected {
+  border-color: #4a9eff;
+  background: #24344a;
+}
+.service-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.service-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.service-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.error-badge {
+  background: #c93636;
+  color: #fff;
+  border-radius: 10px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  flex: 0 0 auto;
+}
+.service-card-sub {
+  font-size: 11px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.behind-badge {
+  color: #5ec26a;
+  font-weight: 700;
+}
+.exit-code {
+  color: #f55;
+  margin-left: 4px;
+}
+/* 경로 미설정 안내 - 에러(exit-code, 밝은 #f55)보다 톤 다운된 red 로 "경고성 안내"와 "실제 에러"를 구분. */
+.cwd-missing-notice {
+  color: #c97b7b;
+}
+.service-card-actions {
+  /* 버튼 2/3개(LIB=Pull 1개, nginx=3개 등)일 때 grid 는 남는 칸을 왼쪽부터 채워 마지막 줄이 왼쪽으로
+     쏠려 보임 - flex-wrap + justify-content:flex-end 로 각 줄을 항상 우측 끝에 맞춤(폭은 2열 고정폭). */
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: flex-start;
+  width: 51px; /* 24px * 2열 + gap 3px */
+  gap: 3px;
+}
+.service-card-actions button {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  text-align: center;
+}
+
+/* main / right panel */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.service-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid #333;
+  background: #202020;
+  flex-shrink: 0;
+}
+.service-header-empty {
+  padding: 20px;
+  color: #888;
+}
+.service-header-title {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.service-header-meta {
+  font-weight: 400;
+  color: #aaa;
+  font-size: 12px;
+}
+.behind-count {
+  color: #5ec26a;
+  font-weight: 700;
+}
+/* service-header-meta(#aaa, 12px)보다 한 톤 더 muted/소형 - 부가 정보(fetch 신선도)라 튀면 안 됨. */
+.service-header-fetch-time {
+  font-weight: 400;
+  color: #777;
+  font-size: 11px;
+  margin-left: 8px;
+}
+
+/* log */
+.log-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.log-panel-empty {
+  background: #181818;
+}
+.log-scroll {
+  flex: 1;
+  overflow-y: auto;
+  background: #181818;
+  font-family: "Cascadia Mono", Consolas, "D2Coding", monospace;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.log-line {
+  white-space: pre;
+  line-height: 20px;
+}
+.log-ts {
+  color: #666;
+  margin-right: 6px;
+}
+.log-sys {
+  color: #4ac1ff;
+}
+.log-error {
+  color: #ff5c5c;
+}
+.log-warn {
+  color: #e0c341;
+}
+.log-debug,
+.log-trace {
+  color: #777;
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid #333;
+  background: #202020;
+  flex-shrink: 0;
+}
+.log-toolbar input[type="text"] {
+  flex: 1;
+  background: #161616;
+  border: 1px solid #3a3a3a;
+  color: #ddd;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.autoscroll-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #ccc;
+  white-space: nowrap;
+}
+
+/* close confirm modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.modal {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 20px;
+  min-width: 320px;
+}
+.modal-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  justify-content: flex-end;
+}
+
+/* 서비스 관리 모달: 탭 전환해도 크기가 안 바뀌게 고정 크기 + 내부만 스크롤/교체 */
+.manage-modal {
+  width: 940px;
+  height: 620px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.manage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.manage-header h2 {
+  font-size: 15px;
+  margin: 0;
+}
+.manage-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.manage-tabs {
+  display: flex;
+  gap: 4px;
+}
+.modal-close-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+  color: #999;
+  flex-shrink: 0;
+}
+.modal-close-btn:hover {
+  color: #fff;
+  border-color: #777;
+}
+.tab-btn.active {
+  border-color: #4a9eff;
+  background: #24344a;
+}
+.manage-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.manage-body {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.manage-list-col {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.manage-list-col-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.manage-list-col-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #999;
+}
+.manage-list-col-hint {
+  font-size: 10px;
+  color: #777;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.manage-batch-chips {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 3px;
+}
+/* 꺼짐 = 흐린 outline(옅은 테두리 + 무채색 텍스트), 켜짐 = 채워진 배경 + 체크 - 행 높이는 기존 그대로(패딩/line-height 안 건드림). */
+.batch-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.4;
+  background: transparent;
+  color: #666;
+  border: 1px solid #3a3a3a;
+  cursor: pointer;
+  transition: border-color 0.1s, background-color 0.1s, color 0.1s;
+}
+.batch-chip:hover {
+  /* 전역 button:hover 가 배경을 회색으로 덮어써 버려서(속성별 캐스케이드) 꺼짐 상태가 hover 시 안 채워진
+     outline 이어야 하는데 채워져 보이는 버그가 있었음 - background 를 명시적으로 다시 투명 처리. */
+  background: transparent;
+  border-color: #777; /* 꺼짐 상태 hover - 테두리 강조 */
+}
+.batch-chip.active {
+  background: #3f7fd6;
+  border-color: #3f7fd6;
+  color: #fff;
+}
+.batch-chip.active:hover {
+  background: #3f7fd6; /* 켜짐 상태는 hover 에도 채워진 배경 유지 - 테두리 톤만 밝게 */
+  border-color: #6ba0e6;
+}
+.manage-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #202020;
+}
+.manage-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #2c2c2c;
+}
+.manage-list-item:hover {
+  background: #2a2a2a;
+}
+.manage-list-item.selected {
+  background: #24344a;
+}
+.manage-list-kind {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #777;
+  min-width: 20px;
+}
+.manage-list-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.manage-list-port {
+  color: #999;
+}
+.manage-list-empty {
+  padding: 14px 8px;
+  color: #888;
+  font-size: 12px;
+}
+.manage-list-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.manage-form-col {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+  padding-right: 4px;
+}
+.manage-form-empty {
+  color: #888;
+  padding: 20px;
+  font-size: 12px;
+}
+
+.edit-form,
+.general-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.general-settings {
+  margin-top: 12px;
+}
+.field-pair {
+  display: flex;
+  gap: 10px;
+}
+.field-pair .field {
+  flex: 1;
+  min-width: 0;
+}
+.branch-label {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+.branch-readonly {
+  width: 110px !important;
+  flex: 0 0 auto;
+  color: #999;
+  cursor: default;
+}
+.field-radio-group {
+  display: flex;
+  gap: 14px;
+}
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.field-label {
+  color: #bbb;
+}
+.field-row {
+  display: flex;
+  gap: 6px;
+}
+.field-row input[type="text"],
+.field-row input[type="number"] {
+  flex: 1;
+}
+.field input[type="text"],
+.field input[type="number"],
+.field select,
+.field textarea {
+  box-sizing: border-box; /* 전역 리셋(*)으로 이미 적용되지만 select/input 정렬 이슈라 명시적으로 재확인 */
+  background: #161616;
+  border: 1px solid #3a3a3a;
+  color: #ddd;
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: inherit; /* select 는 브라우저가 기본적으로 OS UI 폰트를 쓰기도 해서 폰트 차로 인한 미세한 시작점 차이 방지 */
+  width: 100%;
+}
+.field textarea {
+  font-family: "Cascadia Mono", Consolas, "D2Coding", monospace;
+  resize: vertical;
+}
+/* select 는 네이티브 OS 크롬(자체 내부 여백 포함)을 그대로 쓰고 있어서, input 과 padding/border 를
+   똑같이 맞춰도 실제 렌더링 시작 x 가 미세하게 어긋나 보였음 - appearance:none 으로 네이티브 렌더링을
+   끄고 화살표도 직접 그려서 input 과 완전히 동일한 박스 모델로 통일. */
+.field select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 24px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.field-hint {
+  color: #888;
+  font-size: 11px;
+}
+.field-hint-inline {
+  color: #888;
+  font-weight: 400;
+  font-size: 11px;
+}
+.field-error {
+  color: #ff5c5c;
+  font-size: 11px;
+}
+/* field-error(#ff5c5c, 실제 에러)보다 톤 다운된 red - 카드의 .cwd-missing-notice 와 같은 색조로 통일. */
+.field-cwd-notice {
+  color: #c97b7b;
+  font-size: 11px;
+}
+
+.manage-error {
+  color: #ff5c5c;
+  font-size: 12px;
+  margin-top: 8px;
+}
+.manage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+.manage-footer-links {
+  display: flex;
+  gap: 12px;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #4a9eff;
+  text-decoration: underline;
+  font-size: 12px;
+}
+.link-btn:hover {
+  background: none;
+  color: #6fb3ff;
+}
+.manage-footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 저장 완료 토스트: 상단 중앙(헤더 높이 43px 아래로 안 겹치게), 다크 소형, 2초 내외 fade in/out -
+   key 리마운트로 매번 애니메이션 재생. */
+.toast {
+  position: fixed;
+  left: 50%;
+  top: 54px;
+  transform: translateX(-50%);
+  background: #333;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  pointer-events: none; /* 클릭을 가로채지 않게(자동 소멸만 함) */
+  z-index: 60; /* 모달(50)보다 위 - 저장 직후 모달이 닫히는 순간에도 안 가려지게 */
+  animation: toast-fade 2000ms ease both;
+  white-space: nowrap;
+}
+@keyframes toast-fade {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  12% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
