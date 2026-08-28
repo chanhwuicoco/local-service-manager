@@ -262,7 +262,10 @@ pub fn effective_command(svc: &ServiceConfig) -> Option<String> {
     match svc.kind.as_deref() {
         Some("frontend") => Some("npm run dev".to_string()),
         Some("nginx") => Some("nginx.exe".to_string()),
-        _ => Some("gradlew.bat bootRun --args=--spring.profiles.active=local".to_string()),
+        // gradlew bootRun 은 서비스마다 Gradle 데몬 JVM 이 상주해 메모리를 낭비 - jar 빌드 후
+        // java -jar 로 실행하면 뜬 뒤엔 앱 JVM 하나만 남음. process.rs 의 && 체인 실행 +
+        // {jar} 치환(build/libs 산출물)이 이 명령을 해석함.
+        _ => Some("gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local".to_string()),
     }
 }
 
@@ -552,7 +555,7 @@ mod tests {
         assert_eq!(effective_command(by_name("FE_ECC")), Some("npm run dev".to_string()));
         assert_eq!(
             effective_command(by_name("BE_CMS")),
-            Some("gradlew.bat bootRun --args=--spring.profiles.active=local".to_string()),
+            Some("gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local".to_string()),
         );
         assert_eq!(effective_command(by_name("nginx")), Some("nginx.exe".to_string()));
         assert_eq!(effective_command(by_name("FE_LIB")), None);
@@ -656,7 +659,7 @@ mod tests {
         s.kind = None;
         assert_eq!(
             effective_command(&s),
-            Some("gradlew.bat bootRun --args=--spring.profiles.active=local".to_string())
+            Some("gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local".to_string())
         );
     }
 

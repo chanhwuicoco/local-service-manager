@@ -11,12 +11,14 @@ use crate::config::ConfigState;
 use crate::logutil::{decode_bytes, now_ms, strip_ansi, sys_line, LogEmitter, LogLine};
 
 // Arc 로 감싸 do_start/do_stop 에 값으로 넘길 수 있게 함 (Tauri State 는 invoke 수명에 묶여 스레드로 못 들고 감).
+// .0 = id -> pid(추적 중인 프로세스, 기존 그대로). .1 = id -> 시작(체인) 세대 번호 - 여러 단계로 이어지는
+// 체인이 Stop/재시작과 경쟁하지 않게 판단하는 데만 씀(bump_chain_generation 참고, 단일 단계 명령은 안 씀).
 #[derive(Clone)]
-pub struct ProcState(pub Arc<Mutex<HashMap<String, u32>>>);
+pub struct ProcState(pub Arc<Mutex<HashMap<String, u32>>>, pub Arc<Mutex<HashMap<String, u64>>>);
 
 impl ProcState {
     pub fn new() -> Self {
-        ProcState(Arc::new(Mutex::new(HashMap::new())))
+        ProcState(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new())))
     }
 }
 
@@ -116,6 +118,113 @@ fn batch_thread<E: LogEmitter>(emitter: E, id: String, rx: mpsc::Receiver<LogLin
     });
 }
 
+/// cmd /C 로 명령을 실행할 Command 준비. Rust 의 인자 자동 이스케이프(공백이 있으면 전체를 따옴표로
+/// 감싸고 내부 따옴표를 \" 로 escape)가 cmd.exe 의 /C quote-stripping 규칙과 안 맞아 - {jar} 치환으로
+/// 경로에 따옴표가 섞이면 깨짐(cmd 가 "명령을 찾을 수 없음"으로 오인, 실측 확인됨). raw_arg 로 이스케이프
+/// 없이 그대로 붙이면(명령이 따옴표로 시작하지 않는 한) cmd 가 특수 규칙 없이 줄 그대로 실행해 내부
+/// 따옴표(공백 있는 jar 경로 등)도 정상 동작함 - 따옴표 없는 기존 단순 명령에도 동일하게 잘 동작.
+#[cfg(windows)]
+fn shell_command(command_str: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C");
+    cmd.raw_arg(command_str);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn shell_command(command_str: &str) -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", command_str]);
+    cmd
+}
+
+/// 명령을 && 기준 단계(phase) 목록으로 나눔. trim 하고 빈 조각은 무시. 단계가 1개면 do_start_single 로
+/// 빠져 기존 동작과 완전히 동일하게 유지됨(치환/체인 관여 전혀 없음).
+fn split_phases(command_str: &str) -> Vec<String> {
+    command_str.split("&&").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
+/// do_start(체인)·do_stop 호출마다 세대를 1 증가시켜 반환/저장. 체인 스레드는 자신이 시작될 때 받은
+/// 세대와 지금 저장된 세대가 같은지만 보면 "그 사이 Stop(또는 새 Start)이 있었는지"를 락 하나로 경쟁
+/// 조건 없이 판단할 수 있음. 단일 단계 명령은 아무도 이 값을 읽지 않아 완전히 무해(no-op).
+fn bump_chain_generation(proc: &ProcState, id: &str) -> u64 {
+    let mut gens = proc.1.lock().unwrap();
+    let next = gens.get(id).copied().unwrap_or(0) + 1;
+    gens.insert(id.to_string(), next);
+    next
+}
+
+fn chain_generation_is_current(proc: &ProcState, id: &str, my_gen: u64) -> bool {
+    proc.1.lock().unwrap().get(id).copied() == Some(my_gen)
+}
+
+/// <cwd>/build/libs 안에서 실행할 jar 하나를 찾음. 스프링부트가 같이 만드는 "-plain.jar" 는 제외.
+/// 정확히 1개면 절대경로, 0개/2개 이상이면 사용자에게 보여줄 에러 메시지(최신 자동 선택은 하지 않음 -
+/// 엉뚱한 jar 실행 방지). 호출부가 "✖ " 를 붙여 sys 로그로 남김.
+fn resolve_jar(cwd: &str) -> Result<String, String> {
+    let dir = std::path::Path::new(cwd).join("build").join("libs");
+    let mut jars: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().and_then(|e| e.to_str()) == Some("jar")
+                        && !p.file_name().and_then(|n| n.to_str()).unwrap_or("").ends_with("-plain.jar")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    jars.sort();
+    match jars.len() {
+        0 => Err("build/libs 에 jar 없음".to_string()),
+        1 => Ok(jars[0].to_string_lossy().to_string()),
+        _ => {
+            let names: Vec<String> =
+                jars.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
+            Err(format!("build/libs 에 jar 가 여러 개 — 하나만 남기세요: {}", names.join(", ")))
+        }
+    }
+}
+
+/// 단계 문자열의 {jar} 를 build/libs 산출물 절대경로로 치환(공백 있는 경로 대응해 따옴표로 감쌈).
+/// 반드시 spawn 직전에 호출 - 그 전 단계(빌드)가 끝나야 jar 파일이 실제로 생김.
+fn substitute_jar_placeholder(phase: &str, cwd: &str) -> Result<String, String> {
+    if !phase.contains("{jar}") {
+        return Ok(phase.to_string());
+    }
+    let jar_path = resolve_jar(cwd)?;
+    Ok(phase.replace("{jar}", &format!("\"{jar_path}\"")))
+}
+
+/// 한 단계를 spawn 하고 stdout/stderr 리더·배치 스레드를 연결. sys 시작 로그는 호출부 책임(단일 단계는
+/// spawn 이후에, 체인 단계는 spec 상 "시작 전"에 남겨야 해서 순서가 달라 여기 넣지 않음).
+fn spawn_phase<E: LogEmitter>(
+    emitter: &E,
+    service: &crate::config::ServiceConfig,
+    id: &str,
+    resolved: &str,
+) -> Result<std::process::Child, String> {
+    let mut cmd = shell_command(resolved);
+    cmd.current_dir(&service.cwd);
+    cmd.envs(service.env.clone());
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    no_window(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let (tx, rx) = mpsc::channel::<LogLine>();
+    reader_thread(stdout, "out", tx.clone());
+    reader_thread(stderr, "err", tx.clone());
+    drop(tx);
+    batch_thread(emitter.clone(), id.to_string(), rx);
+    Ok(child)
+}
+
 /// 핵심 프로세스 관리 로직. AppHandle 이 아니라 LogEmitter + ProcState/ConfigState 값만 필요해서
 /// 실제 Tauri 앱 없이도(tauri::test::MockRuntime 없이) 순수 Rust 테스트로 검증 가능.
 pub fn do_start<E: LogEmitter>(emitter: &E, proc: &ProcState, cfg: &ConfigState, id: &str) -> Result<u32, String> {
@@ -131,8 +240,51 @@ pub fn do_start<E: LogEmitter>(emitter: &E, proc: &ProcState, cfg: &ConfigState,
     let command_str = crate::config::effective_command(&service)
         .ok_or_else(|| format!("{id} has no command (git-only service)"))?;
 
-    let mut cmd = Command::new("cmd");
-    cmd.args(["/C", &command_str]);
+    let phases = split_phases(&command_str);
+    if phases.is_empty() {
+        return Err(format!("{id}: 실행할 명령이 없습니다"));
+    }
+
+    // 단계가 1개면 기존 로직과 완전히 동일 - {jar} 치환/체인/세대 관여 전혀 없음(기존 테스트 그대로 유지).
+    if phases.len() == 1 {
+        return do_start_single(emitter, proc, &service, id, &command_str);
+    }
+
+    // 체인(2단계 이상): 세대를 먼저 발급 - Stop 이 같은 방식으로 세대를 증가시켜 이 값을 무효화하면
+    // run_chain 이 도중에 끼어들 수 있음(경쟁 조건 없이 판단, bump_chain_generation 주석 참고).
+    let total = phases.len();
+    let my_gen = bump_chain_generation(proc, id);
+    let resolved0 = substitute_jar_placeholder(&phases[0], &service.cwd).map_err(|e| {
+        sys_line(emitter, id, format!("✖ {e}"));
+        e
+    })?;
+    sys_line(emitter, id, format!("▶ [1/{total}] {resolved0}"));
+    let child = spawn_phase(emitter, &service, id, &resolved0)?;
+    let pid = child.id();
+    proc.0.lock().unwrap().insert(id.to_string(), pid);
+    emitter.emit_status_started(id, pid);
+
+    let emitter2 = emitter.clone();
+    let proc2 = proc.clone();
+    let service2 = service.clone();
+    let id2 = id.to_string();
+    let phases2 = phases.clone();
+    std::thread::spawn(move || {
+        run_chain(&emitter2, &proc2, &service2, &id2, &phases2, 0, child, my_gen);
+    });
+
+    Ok(pid)
+}
+
+/// 단일 단계 명령(대부분의 서비스) - 기존 do_start 본문 그대로(cmd 실행 방식만 shell_command 로 통일).
+fn do_start_single<E: LogEmitter>(
+    emitter: &E,
+    proc: &ProcState,
+    service: &crate::config::ServiceConfig,
+    id: &str,
+    command_str: &str,
+) -> Result<u32, String> {
+    let mut cmd = shell_command(command_str);
     cmd.current_dir(&service.cwd);
     cmd.envs(service.env.clone());
     cmd.stdin(Stdio::null());
@@ -195,6 +347,101 @@ pub fn do_start<E: LogEmitter>(emitter: &E, proc: &ProcState, cfg: &ConfigState,
     Ok(pid)
 }
 
+/// 체인(2단계 이상)의 현재 단계가 끝나길 기다렸다가 다음 단계로 잇거나 중단 처리. 재귀 대신 루프로
+/// 순회 - phase_idx 는 지금 기다리는(0-based) 단계 번호, child 는 그 단계의 프로세스.
+fn run_chain<E: LogEmitter>(
+    emitter: &E,
+    proc: &ProcState,
+    service: &crate::config::ServiceConfig,
+    id: &str,
+    phases: &[String],
+    mut phase_idx: usize,
+    mut child: std::process::Child,
+    my_gen: u64,
+) {
+    let total = phases.len();
+    loop {
+        let current_pid = child.id();
+        let status = child.wait();
+        let code = match status {
+            Ok(s) => s.code(),
+            Err(_) => None,
+        };
+
+        // ProcState 를 건드리기 전에 "아직 내 pid 가 최신인지" 스냅샷 - 이미 다른 경로가 바꿔놨으면(경쟁) 안 건드림.
+        let still_mine = proc.0.lock().unwrap().get(id).copied() == Some(current_pid);
+
+        // Stop(또는 그 사이의 새 Start)이 있었으면 세대가 바뀜 → 다음 단계로 잇지 않음. 다만 ProcState 에
+        // 아직 내 pid 가 남아있으면(다른 경로가 이미 정리하지 않음) 정리해서 프론트가 계속 "실행 중"으로 안 남게 함.
+        if !chain_generation_is_current(proc, id, my_gen) {
+            if still_mine {
+                proc.0.lock().unwrap().remove(id);
+                let code_text = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+                sys_line(emitter, id, format!("■ exited (code {code_text})"));
+                emitter.emit_status_exited(id, code);
+            }
+            return;
+        }
+        if !still_mine {
+            return; // 이론상 발생 안 해야 하지만 방어적으로 - 이미 다른 경로가 정리함
+        }
+
+        let is_last = phase_idx + 1 >= total;
+        if is_last {
+            // 마지막 단계(실제 서비스) 종료 - 기존 단일 단계와 완전히 같은 처리.
+            proc.0.lock().unwrap().remove(id);
+            let code_text = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+            sys_line(emitter, id, format!("■ exited (code {code_text})"));
+            emitter.emit_status_exited(id, code);
+            return;
+        }
+
+        if code != Some(0) {
+            // 중간 단계가 실패로 끝남 - 체인 중단, sys 오류 줄, 프론트에 stopped 전달(exited 이벤트로 pid 제거).
+            let code_text = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+            sys_line(emitter, id, format!("✖ [{}/{total}] 종료 코드 {code_text} — 중단", phase_idx + 1));
+            proc.0.lock().unwrap().remove(id);
+            emitter.emit_status_exited(id, code);
+            return;
+        }
+
+        // 성공적으로 다음 단계로 - {jar} 치환은 spawn 직전에.
+        let next_idx = phase_idx + 1;
+        let resolved = match substitute_jar_placeholder(&phases[next_idx], &service.cwd) {
+            Ok(s) => s,
+            Err(e) => {
+                sys_line(emitter, id, format!("✖ {e}"));
+                proc.0.lock().unwrap().remove(id);
+                emitter.emit_status_exited(id, None);
+                return;
+            }
+        };
+        sys_line(emitter, id, format!("▶ [{}/{total}] {resolved}", next_idx + 1));
+
+        let next_child = match spawn_phase(emitter, service, id, &resolved) {
+            Ok(c) => c,
+            Err(e) => {
+                sys_line(emitter, id, format!("✖ [{}/{total}] {e} — 중단", next_idx + 1));
+                proc.0.lock().unwrap().remove(id);
+                emitter.emit_status_exited(id, None);
+                return;
+            }
+        };
+        let next_pid = next_child.id();
+
+        // pid 교체 직전에 세대를 한 번 더 확인 - spawn 하는 사이 Stop 이 왔으면 방금 띄운 프로세스를 바로 정리.
+        if !chain_generation_is_current(proc, id, my_gen) {
+            taskkill_pid(next_pid);
+            return;
+        }
+        proc.0.lock().unwrap().insert(id.to_string(), next_pid);
+        emitter.emit_status_started(id, next_pid);
+
+        child = next_child;
+        phase_idx = next_idx;
+    }
+}
+
 /// nginx 의 정석 종료: `<cwd>\nginx.exe -s stop` (마스터가 워커까지 정리).
 /// 워커 프로세스만 taskkill 하면 마스터가 새 워커를 다시 살려서 이 방법을 먼저 시도해야 함.
 /// PATH 검색을 피하려고 cwd 안의 정확한 실행파일 경로를 지정(다른 nginx 인스턴스를 잘못 건드리지 않게).
@@ -235,6 +482,9 @@ fn nginx_force_kill_all<E: LogEmitter>(emitter: &E, id: &str) {
 /// nginx 는 taskkill 전에 `-s stop` 정석 종료부터 시도(①), 그래도 안 닫히면 기존 포트 폴백(②③)에
 /// 이어 이미지명 전체 강제 종료(④)까지 단계적으로 진행한다.
 pub fn do_stop<E: LogEmitter>(emitter: &E, proc: &ProcState, cfg: &ConfigState, id: &str) -> Result<(), String> {
+    // 체인(다단계 시작) 진행 중이면 다음 단계로 못 넘어가게 세대를 먼저 무효화 - 단일 단계 명령엔
+    // 아무도 세대를 안 읽으므로 완전히 무해(no-op).
+    bump_chain_generation(proc, id);
     let service = find_service(cfg, id);
     let port = service.as_ref().and_then(|s| s.port);
     let is_nginx = service.as_ref().map(|s| s.kind.as_deref() == Some("nginx")).unwrap_or(false);
@@ -778,5 +1028,271 @@ setInterval(() => {
             wait_until(|| matches!(tracked.try_wait(), Ok(Some(_))), Duration::from_secs(5)),
             "taskkill 로 프로세스가 실제로 종료돼야 함"
         );
+    }
+
+    // 이하 && 체인(gradlew.bat bootJar --no-daemon && java -jar {jar} ...) 관련 테스트.
+    // "echo"/"exit"/"ping" 은 cmd 내장 명령이라 별도 스크립트 없이 빌드 단계를 재현할 수 있음.
+
+    #[test]
+    fn chain_hands_off_pid_to_final_phase_without_intermediate_exited_event() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-chain-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_fake_service(&tmp);
+        let port = free_port();
+
+        let svc = ServiceConfig {
+            id: "chain1".into(),
+            name: "Chain1".into(),
+            cwd: tmp.to_string_lossy().to_string(),
+            command: Some(format!("echo build && node fake_service.js {port}")),
+            port: Some(port),
+            env: Default::default(),
+            kind: None,
+            short: None,
+            include_in_all: true,
+        };
+        let cfg = make_config(svc);
+        let proc = ProcState::new();
+        let (tx, rx) = channel();
+        let emitter = TestEmitter::new(tx);
+
+        let phase1_pid = do_start(&emitter, &proc, &cfg, "chain1").expect("체인 시작(1단계 spawn)은 성공해야 함");
+        assert!(
+            wait_until(|| crate::port::port_is_open(port), Duration::from_secs(5)),
+            "최종 단계(진짜 서비스)가 포트를 열어야 함"
+        );
+
+        let final_pid = proc.0.lock().unwrap()["chain1"];
+        assert_ne!(phase1_pid, final_pid, "최종 단계 pid 는 1단계 pid 와 달라야 함(교체됨)");
+
+        {
+            let started = emitter.started.lock().unwrap().clone();
+            assert_eq!(
+                started,
+                vec![("chain1".to_string(), phase1_pid), ("chain1".to_string(), final_pid)],
+                "1단계 시작 → 2단계 시작 순서로 정확히 두 번 started 이벤트가 나야 함"
+            );
+        }
+
+        // 이 시점까지 "■ exited" 가 한 번도 없어야 함 - 성공적인 단계 전환이 exited/stopped 로 새 나가면 안 됨.
+        let mut saw_exited_before_stop = false;
+        while let Ok((_id, lines)) = rx.try_recv() {
+            if lines.iter().any(|l| l.text.contains("■ exited")) {
+                saw_exited_before_stop = true;
+            }
+        }
+        assert!(!saw_exited_before_stop, "1→2 단계 전환 중엔 exited 이벤트/로그가 없어야 함");
+
+        do_stop(&emitter, &proc, &cfg, "chain1").expect("정리용 stop");
+        assert!(wait_until(|| !crate::port::port_is_open(port), Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn chain_aborts_and_reports_stopped_when_first_phase_exits_nonzero() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-chain-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_fake_service(&tmp);
+        let port = free_port();
+
+        let svc = ServiceConfig {
+            id: "chain2".into(),
+            name: "Chain2".into(),
+            cwd: tmp.to_string_lossy().to_string(),
+            command: Some(format!("exit /b 3 && node fake_service.js {port}")),
+            port: Some(port),
+            env: Default::default(),
+            kind: None,
+            short: None,
+            include_in_all: true,
+        };
+        let cfg = make_config(svc);
+        let proc = ProcState::new();
+        let (tx, rx) = channel();
+        let emitter = TestEmitter::new(tx);
+
+        do_start(&emitter, &proc, &cfg, "chain2").expect("1단계 spawn 자체는 성공해야 함(실패는 exit code 로 나중에 감지)");
+
+        assert!(
+            wait_until(|| !proc.0.lock().unwrap().contains_key("chain2"), Duration::from_secs(5)),
+            "1단계 실패 후 ProcState 에서 제거돼(stopped) 프론트에 전달돼야 함"
+        );
+        // 2단계(진짜 서비스)는 절대 실행되면 안 됨 - 넉넉히 대기 후에도 포트가 닫혀 있어야 함.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!crate::port::port_is_open(port), "1단계가 실패했으니 2단계는 실행되면 안 됨");
+
+        let mut saw_error_line = false;
+        while let Ok((_id, lines)) = rx.try_recv() {
+            for l in &lines {
+                if l.text.contains("✖ [1/2] 종료 코드 3 — 중단") {
+                    saw_error_line = true;
+                }
+            }
+        }
+        assert!(saw_error_line, "1단계 실패 sys 오류 줄이 정확한 형식으로 남아야 함");
+    }
+
+    #[test]
+    fn chain_stop_during_first_phase_prevents_second_phase_from_running() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-chain-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_fake_service(&tmp);
+        let port = free_port();
+
+        let svc = ServiceConfig {
+            id: "chain3".into(),
+            name: "Chain3".into(),
+            cwd: tmp.to_string_lossy().to_string(),
+            // ping 으로 몇 초 지연되는 "빌드 중" 상황 재현 - 그 사이 Stop 이 오면 2단계로 넘어가면 안 됨.
+            command: Some(format!("ping -n 6 127.0.0.1 >nul && node fake_service.js {port}")),
+            port: Some(port),
+            env: Default::default(),
+            kind: None,
+            short: None,
+            include_in_all: true,
+        };
+        let cfg = make_config(svc);
+        let proc = ProcState::new();
+        let (tx, _rx) = channel();
+        let emitter = TestEmitter::new(tx);
+
+        do_start(&emitter, &proc, &cfg, "chain3").expect("1단계(지연) 시작은 성공해야 함");
+        assert!(wait_until(|| proc.0.lock().unwrap().contains_key("chain3"), Duration::from_secs(3)));
+
+        do_stop(&emitter, &proc, &cfg, "chain3").expect("1단계 진행 중 stop 은 성공해야 함");
+
+        // ping 이 원래 끝났을 시점(약 5초)까지 넉넉히 기다려도 2단계가 절대 실행되면 안 됨.
+        std::thread::sleep(Duration::from_secs(7));
+        assert!(!crate::port::port_is_open(port), "Stop 이후엔 2단계(진짜 서비스)가 실행되면 안 됨");
+        assert!(!proc.0.lock().unwrap().contains_key("chain3"), "정리까지 끝나 ProcState 에도 안 남아야 함");
+    }
+
+    #[test]
+    fn single_phase_command_is_unaffected_by_chain_logic() {
+        // (f) 단일 명령은 여전히 &&/체인 관여 없이 기존과 동일하게 동작해야 함(회귀 확인).
+        let tmp = std::env::temp_dir().join(format!("lbm-test-single-unaffected-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_fake_service(&tmp);
+        let port = free_port();
+
+        let svc = ServiceConfig {
+            id: "single1".into(),
+            name: "Single1".into(),
+            cwd: tmp.to_string_lossy().to_string(),
+            command: Some(format!("node fake_service.js {port}")),
+            port: Some(port),
+            env: Default::default(),
+            kind: None,
+            short: None,
+            include_in_all: true,
+        };
+        let cfg = make_config(svc);
+        let proc = ProcState::new();
+        let (tx, _rx) = channel();
+        let emitter = TestEmitter::new(tx);
+
+        let pid = do_start(&emitter, &proc, &cfg, "single1").expect("단일 단계 시작은 성공해야 함");
+        assert!(wait_until(|| crate::port::port_is_open(port), Duration::from_secs(5)));
+        assert_eq!(proc.0.lock().unwrap()["single1"], pid, "체인 관여 없이 처음 spawn 한 pid 그대로 유지돼야 함");
+        {
+            let started = emitter.started.lock().unwrap().clone();
+            assert_eq!(started, vec![("single1".to_string(), pid)], "started 이벤트는 정확히 한 번만 나야 함");
+        }
+
+        do_stop(&emitter, &proc, &cfg, "single1").expect("정리용 stop");
+        assert!(wait_until(|| !crate::port::port_is_open(port), Duration::from_secs(5)));
+    }
+}
+
+/// {jar} 치환·&& 분할 관련 순수 함수 테스트 - 프로세스 spawn 없이 빠르게 동작.
+#[cfg(test)]
+mod chain_helper_tests {
+    use super::*;
+
+    #[test]
+    fn ampersand_chain_splits_trims_and_drops_empty_segments() {
+        assert_eq!(
+            split_phases("  gradlew.bat bootJar --no-daemon   &&   java -jar {jar} --spring.profiles.active=local  "),
+            vec![
+                "gradlew.bat bootJar --no-daemon".to_string(),
+                "java -jar {jar} --spring.profiles.active=local".to_string(),
+            ],
+        );
+        assert_eq!(split_phases("npm run dev"), vec!["npm run dev".to_string()], "단일 명령은 그대로 한 단계여야 함");
+        assert_eq!(split_phases("a && && b"), vec!["a".to_string(), "b".to_string()], "빈 조각은 무시되어야 함");
+        assert!(split_phases("   ").is_empty(), "공백뿐이면 단계가 없어야 함");
+    }
+
+    #[test]
+    fn resolve_jar_picks_the_only_non_plain_jar() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-jar-pick-{}", std::process::id()));
+        let libs = tmp.join("build").join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::write(libs.join("a-plain.jar"), b"").unwrap();
+        std::fs::write(libs.join("a.jar"), b"").unwrap();
+
+        let result = resolve_jar(&tmp.to_string_lossy()).expect("plain 제외하면 정확히 1개라 성공해야 함");
+        assert!(result.ends_with("a.jar") && !result.ends_with("a-plain.jar"), "got: {result}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_jar_errors_when_no_jar_present() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-jar-none-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("build").join("libs")).unwrap();
+
+        let err = resolve_jar(&tmp.to_string_lossy()).expect_err("jar 가 없으면 실패해야 함");
+        assert_eq!(err, "build/libs 에 jar 없음");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_jar_errors_when_build_libs_missing_entirely() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-jar-nodir-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap(); // build/libs 자체가 없음(빌드를 아직 한 번도 안 돌린 상황)
+
+        let err = resolve_jar(&tmp.to_string_lossy()).expect_err("build/libs 폴더가 없어도 실패로 처리돼야 함");
+        assert_eq!(err, "build/libs 에 jar 없음");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_jar_errors_when_multiple_jars_present() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-jar-multi-{}", std::process::id()));
+        let libs = tmp.join("build").join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::write(libs.join("a.jar"), b"").unwrap();
+        std::fs::write(libs.join("b.jar"), b"").unwrap();
+
+        let err = resolve_jar(&tmp.to_string_lossy()).expect_err("jar 가 2개 이상이면 실패해야 함(최신 자동 선택 금지)");
+        assert!(err.contains("여러 개"), "got: {err}");
+        assert!(err.contains("a.jar") && err.contains("b.jar"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn substitute_jar_placeholder_leaves_phase_without_placeholder_untouched() {
+        assert_eq!(
+            substitute_jar_placeholder("gradlew.bat bootJar --no-daemon", "C:/anything").unwrap(),
+            "gradlew.bat bootJar --no-daemon"
+        );
+    }
+
+    #[test]
+    fn substitute_jar_placeholder_quotes_the_resolved_path() {
+        let tmp = std::env::temp_dir().join(format!("lbm-test-jar-sub-{}", std::process::id()));
+        let libs = tmp.join("build").join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::write(libs.join("app.jar"), b"").unwrap();
+
+        let resolved =
+            substitute_jar_placeholder("java -jar {jar} --spring.profiles.active=local", &tmp.to_string_lossy()).unwrap();
+        assert!(resolved.starts_with("java -jar \""), "공백 있는 경로 대응을 위해 따옴표로 감싸야 함: {resolved}");
+        assert!(resolved.contains("app.jar\" --spring.profiles.active=local"), "got: {resolved}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

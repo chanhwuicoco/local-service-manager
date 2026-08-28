@@ -103,7 +103,7 @@ function createTauriBackend(): Backend {
 const now = () => Date.now();
 
 function defaultConfig(): AppConfig {
-  const gradle = "gradlew.bat bootRun --args=--spring.profiles.active=local";
+  const gradle = "gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local";
   const svc = (
     id: string,
     name: string,
@@ -244,7 +244,7 @@ function createMockBackend(): Backend {
         npmHasDev: false,
         npmHasStart: false,
         hasNginxExe: false,
-        suggestedCommand: "gradlew.bat bootRun --args=--spring.profiles.active=local",
+        suggestedCommand: "gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local",
         portCandidates: [
           { port: 8199, source: "application-local.yml" },
           { port: 8090, source: "application.yml" },

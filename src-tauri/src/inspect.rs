@@ -38,7 +38,9 @@ pub fn suggest_command(
     if has_nginx_exe {
         Some("nginx.exe".into())
     } else if has_gradlew {
-        Some("gradlew.bat bootRun --args=--spring.profiles.active=local".into())
+        // gradlew bootRun 은 서비스마다 Gradle 데몬 JVM 이 상주 - jar 빌드 후 java -jar 로 실행하면
+        // 앱 JVM 하나만 남음(process.rs 의 && 체인 + {jar} 치환이 해석).
+        Some("gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local".into())
     } else if has_mvnw {
         Some("mvnw.cmd spring-boot:run".into())
     } else if has_package_json {
@@ -411,7 +413,7 @@ mod tests {
         // 프론트 "백엔드" 유형 프리셋과 항상 동일한 문자열이어야 함.
         assert_eq!(
             suggest_command(true, false, false, false, false),
-            Some("gradlew.bat bootRun --args=--spring.profiles.active=local".to_string())
+            Some("gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local".to_string())
         );
     }
 

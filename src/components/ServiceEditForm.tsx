@@ -144,7 +144,10 @@ export default function ServiceEditForm({ svc, branch, onChange, onPickFolder, o
         <>
           <label className="field">
             <span className="field-label">
-              실행 명령 <span className="field-hint-inline">(비워두면 유형 기본값)</span>
+              실행 명령{" "}
+              <span className="field-hint-inline">
+                (비워두면 유형 기본값 · && 로 단계 순차 실행 · {"{jar}"} = build/libs 의 jar)
+              </span>
             </span>
             <input
               type="text"

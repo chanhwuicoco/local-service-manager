@@ -1,6 +1,8 @@
 import type { AppConfig, ServiceConfig, ServiceKind } from "../types";
 
-export const BACKEND_COMMAND = "gradlew.bat bootRun --args=--spring.profiles.active=local";
+// gradlew bootRun 은 서비스마다 Gradle 데몬 JVM 이 상주해 메모리 낭비 - jar 빌드 후 java -jar 로
+// 실행하면 뜬 뒤엔 앱 JVM 하나만 남음. && 로 단계 순차 실행되고 {jar} 는 build/libs 산출물로 치환됨(Rust process.rs).
+export const BACKEND_COMMAND = "gradlew.bat bootJar --no-daemon && java -jar {jar} --spring.profiles.active=local";
 export const FRONTEND_COMMAND = "npm run dev";
 export const NGINX_COMMAND = "nginx.exe";
 /** kind=frontend 선택 시 안내용 placeholder 포트(값은 자동 커밋하지 않음 — 환경 감지가 실제 후보로 채울 수 있게). */
