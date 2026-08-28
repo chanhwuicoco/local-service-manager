@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { deriveStatus, useStore } from "../store";
+import { deriveStatus, extractErrorLines, useStore } from "../store";
 import { formatMinutesAgo } from "../lib/configDraft";
 
 const STATUS_EMOJI: Record<string, string> = {
@@ -8,6 +8,25 @@ const STATUS_EMOJI: Record<string, string> = {
   external: "🔵",
   stopped: "🔴",
 };
+
+function ErrorPanelToggle() {
+  const errorPanelOpen = useStore((s) => s.errorPanelOpen);
+  const toggleErrorPanel = useStore((s) => s.toggleErrorPanel);
+  const selectedId = useStore((s) => s.selectedId);
+  const rt = useStore((s) => (selectedId ? s.services[selectedId] : undefined));
+  const errorCount = rt ? extractErrorLines(rt.logs).length : 0;
+  return (
+    <button
+      type="button"
+      className={`error-panel-toggle${errorPanelOpen ? " active" : ""}`}
+      data-testid="error-panel-toggle"
+      title={errorPanelOpen ? "에러 패널 닫기" : "에러 패널 열기"}
+      onClick={toggleErrorPanel}
+    >
+      ⚠ 에러{errorCount > 0 ? ` ${errorCount}` : ""}
+    </button>
+  );
+}
 
 export default function ServiceHeader() {
   const selectedId = useStore((s) => s.selectedId);
@@ -24,7 +43,12 @@ export default function ServiceHeader() {
 
   const rt = selectedId ? services[selectedId] : undefined;
   if (!rt) {
-    return <div className="service-header service-header-empty">서비스를 선택하세요</div>;
+    return (
+      <div className="service-header service-header-empty">
+        <span>서비스를 선택하세요</span>
+        <ErrorPanelToggle />
+      </div>
+    );
   }
 
   const gitOnly = rt.config.command === null;
@@ -73,6 +97,7 @@ export default function ServiceHeader() {
           <span className="service-header-fetch-time">마지막 git fetch: {formatMinutesAgo(fetchedAt, Date.now())}</span>
         )}
       </div>
+      <ErrorPanelToggle />
     </div>
   );
 }

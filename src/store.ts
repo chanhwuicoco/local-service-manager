@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { backend } from "./lib/backend";
 import { resolveIncludeInAll, resolveKind } from "./lib/configDraft";
-import type { AppConfig, GitInfo, LogLine, ServiceConfig, ServiceStatus } from "./types";
+import type { AppConfig, GitInfo, LogLine, RawLogLine, ServiceConfig, ServiceStatus } from "./types";
 
 export interface ServiceRuntime {
   config: ServiceConfig;
@@ -11,6 +11,8 @@ export interface ServiceRuntime {
   git?: GitInfo;
   logs: LogLine[];
   unreadErrors: number;
+  /** 다음 로그 줄에 부여할 seq(서비스별 1부터 누적, clearLogs 시 1로 리셋). */
+  nextSeq: number;
 }
 
 export function deriveStatus(rt: ServiceRuntime): ServiceStatus {
@@ -45,6 +47,19 @@ export function logLevel(text: string): "error" | "warn" | "debug" | "trace" | n
   return null;
 }
 
+// seq 는 로그 버퍼 안에서의 index 가 아니라 서비스별 누적 카운터로 부여함 - index 를 쓰면 capLogs 로 앞부분이
+// 잘릴 때마다 남은 줄들의 번호가 전부 당겨지고, 검색으로 걸러진 상태에서도 번호가 필터링 전과 달라져 버림.
+// seq 는 라인 발생 순서를 그대로 보존하는 불변 값이라 이 두 문제가 없음.
+/** RawLogLine[] 에 startSeq 부터 순번을 매겨 LogLine[] 로 변환. */
+export function assignSeq(lines: RawLogLine[], startSeq: number): LogLine[] {
+  return lines.map((l, i) => ({ ...l, seq: startSeq + i }));
+}
+
+/** 선택 서비스 로그에서 에러 줄만 추출(sys 스트림은 시스템 메시지라 제외) - 에러 패널 목록/배지 카운트 공용. */
+export function extractErrorLines(logs: LogLine[]): LogLine[] {
+  return logs.filter((l) => l.stream !== "sys" && logLevel(l.text) === "error");
+}
+
 /** maxLogLines(0=제한 없음) 기준으로 앞부분을 잘라냄. */
 export function capLogs(logs: LogLine[], maxLogLines: number): LogLine[] {
   if (maxLogLines <= 0) return logs;
@@ -72,7 +87,7 @@ export function reconcileConfig(
     const prev = prevServices[svc.id];
     services[svc.id] = prev
       ? { ...prev, config: svc, logs: capLogs(prev.logs, config.maxLogLines) }
-      : { config: svc, portOpen: false, logs: [], unreadErrors: 0 };
+      : { config: svc, portOpen: false, logs: [], unreadErrors: 0, nextSeq: 1 };
   }
   const selectedId = prevSelectedId && services[prevSelectedId] ? prevSelectedId : (order[0] ?? null);
   return { order, services, selectedId };
@@ -91,6 +106,16 @@ function loadSidebarCollapsed(): boolean {
   }
 }
 
+// 에러 패널은 기본 닫힘 - "1" 로 명시 저장된 적이 있을 때만 열림으로 복원(사이드바 collapsed 와 동일 패턴).
+const ERROR_PANEL_OPEN_KEY = "lbm.errorPanelOpen";
+function loadErrorPanelOpen(): boolean {
+  try {
+    return localStorage.getItem(ERROR_PANEL_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 interface Store {
   config: AppConfig | null;
   order: string[];
@@ -100,6 +125,9 @@ interface Store {
   autoScroll: boolean;
   closeModalOpen: boolean;
   sidebarCollapsed: boolean;
+  errorPanelOpen: boolean;
+  /** 에러 패널 항목 클릭 -> LogPanel 이 해당 줄로 스크롤+하이라이트. nonce 는 같은 줄 재클릭도 감지되게 매번 증가. */
+  jumpTarget: { id: string; seq: number; nonce: number } | null;
   manageModalOpen: boolean;
   ready: boolean;
   busy: Record<string, boolean>;
@@ -118,6 +146,8 @@ interface Store {
   clearLogs: (id: string) => void;
   exportLogs: (id: string) => Promise<void>;
   toggleSidebar: () => void;
+  toggleErrorPanel: () => void;
+  jumpToLine: (id: string, seq: number) => void;
   openManageModal: () => void;
   closeManageModal: () => void;
   showToast: (message: string) => void;
@@ -211,6 +241,8 @@ export const useStore = create<Store>((set, get) => {
     autoScroll: true,
     closeModalOpen: false,
     sidebarCollapsed: loadSidebarCollapsed(),
+    errorPanelOpen: loadErrorPanelOpen(),
+    jumpTarget: null,
     manageModalOpen: false,
     ready: false,
     busy: {},
@@ -224,7 +256,7 @@ export const useStore = create<Store>((set, get) => {
       const order = config.services.map((s) => s.id);
       const services: Record<string, ServiceRuntime> = {};
       for (const svc of config.services) {
-        services[svc.id] = { config: svc, portOpen: false, logs: [], unreadErrors: 0 };
+        services[svc.id] = { config: svc, portOpen: false, logs: [], unreadErrors: 0, nextSeq: 1 };
       }
       set({ config, order, services, selectedId: order[0] ?? null });
 
@@ -260,14 +292,18 @@ export const useStore = create<Store>((set, get) => {
           const rt = s.services[id];
           if (!rt) return {};
           const cap = s.config?.maxLogLines ?? 10000;
-          const merged = [...rt.logs, ...lines];
+          const numbered = assignSeq(lines, rt.nextSeq);
+          const merged = [...rt.logs, ...numbered];
           const capped = capLogs(merged, cap);
           const isSelected = s.selectedId === id;
           const newErrors = isSelected
             ? 0
             : rt.unreadErrors + lines.filter((l) => logLevel(l.text) === "error").length;
           return {
-            services: { ...s.services, [id]: { ...rt, logs: capped, unreadErrors: newErrors } },
+            services: {
+              ...s.services,
+              [id]: { ...rt, logs: capped, unreadErrors: newErrors, nextSeq: rt.nextSeq + numbered.length },
+            },
           };
         });
       });
@@ -380,7 +416,7 @@ export const useStore = create<Store>((set, get) => {
       set((s) => {
         const rt = s.services[id];
         if (!rt) return {};
-        return { services: { ...s.services, [id]: { ...rt, logs: [] } } };
+        return { services: { ...s.services, [id]: { ...rt, logs: [], nextSeq: 1 } } };
       });
     },
 
@@ -409,6 +445,19 @@ export const useStore = create<Store>((set, get) => {
         }
         return { sidebarCollapsed: next };
       }),
+    toggleErrorPanel: () =>
+      set((s) => {
+        const next = !s.errorPanelOpen;
+        try {
+          localStorage.setItem(ERROR_PANEL_OPEN_KEY, next ? "1" : "0");
+        } catch {
+          // localStorage 사용 불가 환경이면 그냥 메모리 상태만 유지
+        }
+        return { errorPanelOpen: next };
+      }),
+    // nonce 를 매번 올려서 같은 줄을 다시 클릭해도(seq 가 이전과 동일해도) LogPanel 의 useEffect 가 재실행됨.
+    jumpToLine: (id, seq) =>
+      set((s) => ({ jumpTarget: { id, seq, nonce: (s.jumpTarget?.nonce ?? 0) + 1 } })),
     openManageModal: () => set({ manageModalOpen: true }),
     closeManageModal: () => set({ manageModalOpen: false }),
     // toastKey 를 매번 올려서 같은 문구가 연달아 떠도(예: 저장 두 번) React key 로 리마운트돼 fade 애니메이션이 처음부터 다시 재생됨.

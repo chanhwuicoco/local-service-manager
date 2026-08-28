@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMinutesAgo, moveKindToSlot, moveToSlot, validateDraftConfig } from "./configDraft";
+import { formatMinutesAgo, LOG_CLEAR_LABEL, moveKindToSlot, moveToSlot, validateDraftConfig } from "./configDraft";
 import type { AppConfig, ServiceConfig, ServiceKind } from "../types";
 
 const ORDER: ServiceKind[] = ["backend", "frontend", "lib", "nginx"];
@@ -188,5 +188,12 @@ describe("formatMinutesAgo", () => {
 
   it("falls back to '방금 전' when now is somehow before the fetch time (clock skew)", () => {
     expect(formatMinutesAgo(10_000, 0)).toBe("방금 전");
+  });
+});
+
+// LogPanel 툴바의 로그 지우기 버튼은 이 상수를 그대로 렌더링함 - 컴포넌트 렌더링 없이도 레이블 값을 검증.
+describe("LOG_CLEAR_LABEL", () => {
+  it("is the English label 'Log Clear' (음역 대신 원어 그대로)", () => {
+    expect(LOG_CLEAR_LABEL).toBe("Log Clear");
   });
 });

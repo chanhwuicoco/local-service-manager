@@ -27,10 +27,16 @@ export interface AppConfig {
 
 export type LogStream = "out" | "err" | "sys";
 
-export interface LogLine {
+/** 백엔드 이벤트로 오는 원본 로그 줄(seq 없음) - store 의 append 시점에 서비스별 순번(seq)을 붙여 LogLine 이 됨. */
+export interface RawLogLine {
   ts: number;
   stream: LogStream;
   text: string;
+}
+
+/** 화면 표시/검색/에러 패널 점프에 쓰는 로그 줄 - seq 는 서비스별 누적 순번(store.ts 의 assignSeq 참고). */
+export interface LogLine extends RawLogLine {
+  seq: number;
 }
 
 export interface GitInfo {
@@ -42,7 +48,7 @@ export interface GitInfo {
 
 export interface LogEventPayload {
   id: string;
-  lines: LogLine[];
+  lines: RawLogLine[];
 }
 
 export type StatusEventPayload =

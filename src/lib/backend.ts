@@ -4,7 +4,7 @@ import type {
   GitEventPayload,
   GitInfo,
   LogEventPayload,
-  LogLine,
+  RawLogLine,
   ServiceConfig,
   StatusEventPayload,
 } from "../types";
@@ -170,7 +170,7 @@ function createMockBackend(): Backend {
   const timers: Record<string, ReturnType<typeof setInterval>> = {};
   const startTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
-  const emitLog = (id: string, lines: LogLine[]) => {
+  const emitLog = (id: string, lines: RawLogLine[]) => {
     listeners.log.forEach((cb) => cb({ id, lines }));
   };
   const emitGit = (id: string) => {

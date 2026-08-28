@@ -197,3 +197,13 @@ export function formatMinutesAgo(fetchedAtMs: number, nowMs: number): string {
   if (diffMin < 1) return "방금 전";
   return `${diffMin}분 전`;
 }
+
+/** epoch ms -> "HH:MM:SS" - LogPanel/ErrorPanel 이 공유하는 로그 줄 시각 표시 포맷. */
+export function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** LogPanel 툴바의 로그 지우기 버튼 레이블 - 상수로 빼서 vitest 에서 렌더링 없이 값만 검증 가능하게 함. */
+export const LOG_CLEAR_LABEL = "Log Clear";

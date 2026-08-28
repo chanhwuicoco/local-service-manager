@@ -407,6 +407,10 @@ button:disabled {
   border-bottom: 1px solid #333;
   background: #202020;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 .service-header-empty {
   padding: 20px;
@@ -435,6 +439,17 @@ button:disabled {
   font-size: 11px;
   margin-left: 8px;
 }
+.error-panel-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.error-panel-toggle.active {
+  background: #4a2323;
+  border-color: #7a3a3a;
+  color: #ff8a8a;
+}
 
 /* log */
 .log-panel {
@@ -457,6 +472,26 @@ button:disabled {
 .log-line {
   white-space: pre;
   line-height: 20px;
+}
+/* 에러 패널 항목 클릭 시 잠깐 배경만 깜빡임(텍스트 색은 기존 레벨 색 그대로 유지). */
+.log-line-highlight {
+  animation: log-line-flash 1.5s ease-out;
+}
+@keyframes log-line-flash {
+  0% {
+    background-color: rgba(255, 92, 92, 0.35);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.log-ln {
+  display: inline-block;
+  width: 6ch;
+  text-align: right;
+  color: #555;
+  margin-right: 8px;
+  user-select: none;
 }
 .log-ts {
   color: #666;
@@ -501,6 +536,10 @@ button:disabled {
   font-size: 12px;
   color: #ccc;
   white-space: nowrap;
+}
+/* 툴바 맨 오른쪽 고정 - 검색 input 이 이미 flex:1 로 남는 공간을 다 차지하지만, 의도를 명시적으로 남김. */
+.log-clear-btn {
+  margin-left: auto;
 }
 
 /* close confirm modal */
@@ -886,4 +925,76 @@ button:disabled {
   100% {
     opacity: 0;
   }
+}
+
+/* 우측 에러 패널: 사이드바(.sidebar)와 같은 톤/너비 전환 방식이지만 기본은 닫힘(width:0). */
+.error-panel {
+  width: 0;
+  flex-shrink: 0;
+  background: #232323;
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.15s ease;
+}
+.error-panel.open {
+  width: 320px;
+}
+.error-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid #333;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.error-panel-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.error-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+.error-panel-empty {
+  padding: 16px 10px;
+  color: #888;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.error-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #ff8a8a;
+  font-family: "Cascadia Mono", Consolas, "D2Coding", monospace;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.error-item:hover {
+  background: #2f2f2f;
+}
+.error-item-seq {
+  color: #777;
+  margin-right: 6px;
+}
+.error-item-time {
+  color: #999;
+  margin-right: 6px;
 }

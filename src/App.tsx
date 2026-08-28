@@ -4,6 +4,7 @@ import Header from "./components/Header";
 import ServiceList from "./components/ServiceList";
 import ServiceHeader from "./components/ServiceHeader";
 import LogPanel from "./components/LogPanel";
+import ErrorPanel from "./components/ErrorPanel";
 import CloseModal from "./components/CloseModal";
 import ServiceManageModal from "./components/ServiceManageModal";
 import Toast from "./components/Toast";
@@ -86,6 +87,7 @@ function App() {
           <ServiceHeader />
           <LogPanel />
         </main>
+        <ErrorPanel />
       </div>
       <CloseModal />
       <ServiceManageModal />
