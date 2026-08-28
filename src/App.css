@@ -485,6 +485,10 @@ button:disabled {
     background-color: transparent;
   }
 }
+/* 앱이 직접 관리하는 줄 범위 선택(드래그/Shift+클릭) 배경. */
+.log-line-selected {
+  background-color: rgba(90, 140, 255, 0.25);
+}
 .log-ln {
   display: inline-block;
   width: 6ch;
@@ -496,6 +500,37 @@ button:disabled {
 .log-ts {
   color: #666;
   margin-right: 6px;
+  user-select: none;
+}
+/* 줄 범위 드래그 중에만 브라우저 기본 텍스트 선택을 막음(평소엔 한 줄 안 부분 선택이 되어야 함). */
+.log-scroll-no-select {
+  user-select: none;
+}
+/* 줄 범위 선택 우클릭 메뉴 - 복사 하나만 있는 단순 커스텀 메뉴. */
+.log-ctx-menu {
+  position: fixed;
+  z-index: 100;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+}
+.log-ctx-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: #ddd;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.log-ctx-menu button:hover {
+  background: #3a3a3a;
 }
 .log-sys {
   color: #4ac1ff;
