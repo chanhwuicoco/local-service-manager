@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { logLevel, useStore } from "../store";
+import { isAutoScroll, logLevel, useStore } from "../store";
 import { formatTime, LOG_CLEAR_LABEL } from "../lib/configDraft";
 import { buildCopyText, countCopiedLines, selectionRange, type LineRangeSelection } from "../lib/logSelection";
 import type { LogLine } from "../types";
@@ -21,8 +21,9 @@ export default function LogPanel() {
   const services = useStore((s) => s.services);
   const search = useStore((s) => s.search);
   const setSearch = useStore((s) => s.setSearch);
-  const autoScroll = useStore((s) => s.autoScroll);
+  const autoScrollById = useStore((s) => s.autoScrollById);
   const setAutoScroll = useStore((s) => s.setAutoScroll);
+  const autoScroll = isAutoScroll(autoScrollById, selectedId);
   const clearLogs = useStore((s) => s.clearLogs);
   const exportLogs = useStore((s) => s.exportLogs);
   const jumpTarget = useStore((s) => s.jumpTarget);
@@ -43,11 +44,39 @@ export default function LogPanel() {
     overscan: 20,
   });
 
+  // 서비스별 스크롤 위치 기억(메모리만, persist 안 함) - 전환 시 이전 서비스 걸 저장하고 새 서비스 걸 복원.
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map());
+  // 렌더 도중(커밋 전)에 이전 selectedId 의 scrollTop 을 저장 - effect 안에서 읽으면 이미 새 서비스
+  // 내용으로 DOM 이 바뀐 뒤라 늦음(내용이 짧아지면 브라우저가 scrollTop 을 이미 clamp 했을 수 있음).
+  const prevSelectedIdRef = useRef<string | null>(null);
+  if (prevSelectedIdRef.current !== selectedId) {
+    if (prevSelectedIdRef.current != null && parentRef.current) {
+      scrollPositionsRef.current.set(prevSelectedIdRef.current, parentRef.current.scrollTop);
+    }
+    prevSelectedIdRef.current = selectedId;
+  }
+
   useEffect(() => {
     if (autoScroll && filtered.length > 0) {
       virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
     }
   }, [filtered.length, autoScroll, virtualizer]);
+
+  // 새 서비스로 전환 시 Auto-scroll 이 꺼져 있으면 저장된 위치로 복원(켜져 있으면 위 바닥-고정 effect 가 처리).
+  // virtualizer 총 높이가 갱신된 뒤에 적용돼야 해서 useLayoutEffect + 다음 프레임에 한 번 더
+  // (스크롤 컨테이너 DOM 노드는 서비스 전환에도 재사용되므로 같은 el 에 다시 씀).
+  useLayoutEffect(() => {
+    if (autoScroll) return;
+    const el = parentRef.current;
+    if (!el || !selectedId) return;
+    const saved = scrollPositionsRef.current.get(selectedId) ?? 0;
+    el.scrollTop = saved;
+    const raf = requestAnimationFrame(() => {
+      if (parentRef.current) parentRef.current.scrollTop = saved;
+    });
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // 에러 패널 항목 클릭 -> 해당 줄로 스크롤 + 잠깐 하이라이트.
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null);
@@ -65,7 +94,7 @@ export default function LogPanel() {
     if (pendingJumpNonceRef.current !== jumpTarget.nonce) {
       pendingJumpNonceRef.current = jumpTarget.nonce;
       // 점프 직후 새 로그가 도착하면 auto-scroll 이 다시 바닥으로 튕겨버리므로 먼저 꺼야 함.
-      setAutoScroll(false);
+      setAutoScroll(jumpTarget.id, false);
     }
     const idx = filtered.findIndex((l) => l.seq === jumpTarget.seq);
     if (idx === -1) {
@@ -359,7 +388,7 @@ export default function LogPanel() {
             type="checkbox"
             data-testid="log-autoscroll"
             checked={autoScroll}
-            onChange={(e) => setAutoScroll(e.target.checked)}
+            onChange={(e) => selectedId && setAutoScroll(selectedId, e.target.checked)}
           />
           Auto-scroll
         </label>

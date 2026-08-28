@@ -116,13 +116,50 @@ function loadErrorPanelOpen(): boolean {
   }
 }
 
+// Auto-scroll 은 서비스별로 따로 켜고 끔 - 값이 없는(=한 번도 안 만진) 서비스는 기본 true.
+const AUTO_SCROLL_BY_ID_KEY = "lbm.autoScrollById";
+/** localStorage 원문을 서비스별 auto-scroll 맵으로 파싱 - 형식이 잘못됐으면 빈 객체(전부 기본 true 취급). */
+export function parseAutoScrollById(raw: string | null): Record<string, boolean> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, boolean> = {};
+    for (const [id, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "boolean") result[id] = v;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+function loadAutoScrollById(): Record<string, boolean> {
+  try {
+    return parseAutoScrollById(localStorage.getItem(AUTO_SCROLL_BY_ID_KEY));
+  } catch {
+    return {};
+  }
+}
+function saveAutoScrollById(map: Record<string, boolean>) {
+  try {
+    localStorage.setItem(AUTO_SCROLL_BY_ID_KEY, JSON.stringify(map));
+  } catch {
+    // localStorage 사용 불가 환경이면 그냥 메모리 상태만 유지
+  }
+}
+/** 서비스별 auto-scroll 값 조회 - 저장된 값이 없으면 기본 true. */
+export function isAutoScroll(autoScrollById: Record<string, boolean>, id: string | null): boolean {
+  if (!id) return true;
+  return autoScrollById[id] ?? true;
+}
+
 interface Store {
   config: AppConfig | null;
   order: string[];
   services: Record<string, ServiceRuntime>;
   selectedId: string | null;
   search: string;
-  autoScroll: boolean;
+  autoScrollById: Record<string, boolean>;
   closeModalOpen: boolean;
   sidebarCollapsed: boolean;
   errorPanelOpen: boolean;
@@ -142,7 +179,7 @@ interface Store {
   init: () => Promise<void>;
   select: (id: string) => void;
   setSearch: (v: string) => void;
-  setAutoScroll: (v: boolean) => void;
+  setAutoScroll: (id: string, v: boolean) => void;
   clearLogs: (id: string) => void;
   exportLogs: (id: string) => Promise<void>;
   toggleSidebar: () => void;
@@ -238,7 +275,7 @@ export const useStore = create<Store>((set, get) => {
     services: {},
     selectedId: null,
     search: "",
-    autoScroll: true,
+    autoScrollById: loadAutoScrollById(),
     closeModalOpen: false,
     sidebarCollapsed: loadSidebarCollapsed(),
     errorPanelOpen: loadErrorPanelOpen(),
@@ -410,7 +447,12 @@ export const useStore = create<Store>((set, get) => {
     },
 
     setSearch: (v) => set({ search: v }),
-    setAutoScroll: (v) => set({ autoScroll: v }),
+    setAutoScroll: (id, v) =>
+      set((s) => {
+        const next = { ...s.autoScrollById, [id]: v };
+        saveAutoScrollById(next);
+        return { autoScrollById: next };
+      }),
 
     clearLogs: (id) => {
       set((s) => {

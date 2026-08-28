@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { assignSeq, capLogs, extractErrorLines, useStore } from "./store";
+import { describe, expect, it, vi } from "vitest";
+import { assignSeq, capLogs, extractErrorLines, isAutoScroll, parseAutoScrollById, useStore } from "./store";
 import type { LogLine, RawLogLine } from "./types";
 
 function raw(text: string, stream: RawLogLine["stream"] = "out"): RawLogLine {
@@ -113,5 +113,81 @@ describe("jumpToLine", () => {
     // 다른 서비스/다른 줄로 점프해도 nonce 는 계속 이어서 증가.
     useStore.getState().jumpToLine("svc2", 7);
     expect(useStore.getState().jumpTarget).toEqual({ id: "svc2", seq: 7, nonce: 3 });
+  });
+});
+
+// Auto-scroll 은 서비스별 Record<string, boolean> 로 관리 - 값이 없는 서비스는 기본 true(isAutoScroll 로 조회).
+describe("autoScrollById", () => {
+  it("저장된 값이 없는 서비스는 기본 true", () => {
+    expect(isAutoScroll({}, "svc1")).toBe(true);
+    expect(isAutoScroll({ svc2: false }, "svc1")).toBe(true); // 다른 id 값은 영향 없음
+  });
+
+  it("id 가 null 이면(선택된 서비스 없음) true", () => {
+    expect(isAutoScroll({ svc1: false }, null)).toBe(true);
+  });
+
+  it("false 로 저장된 서비스는 false 를 그대로 반환", () => {
+    expect(isAutoScroll({ svc1: false }, "svc1")).toBe(false);
+  });
+
+  it("setAutoScroll(id) 는 해당 id 만 바꾸고 다른 id 에 영향 없다", () => {
+    useStore.setState({ autoScrollById: {} });
+
+    useStore.getState().setAutoScroll("svc1", false);
+    expect(useStore.getState().autoScrollById).toEqual({ svc1: false });
+    expect(isAutoScroll(useStore.getState().autoScrollById, "svc2")).toBe(true); // 건드린 적 없으면 기본 true
+
+    useStore.getState().setAutoScroll("svc2", false);
+    expect(useStore.getState().autoScrollById).toEqual({ svc1: false, svc2: false });
+
+    // svc1 을 다시 켜도 svc2 는 그대로.
+    useStore.getState().setAutoScroll("svc1", true);
+    expect(useStore.getState().autoScrollById).toEqual({ svc1: true, svc2: false });
+  });
+
+  it("setAutoScroll 은 localStorage 에 id->boolean 맵 전체를 JSON 으로 저장한다", () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    try {
+      useStore.setState({ autoScrollById: {} });
+      useStore.getState().setAutoScroll("svc1", false);
+      expect(JSON.parse(store.get("lbm.autoScrollById")!)).toEqual({ svc1: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+// localStorage 가 없는 테스트 환경(jsdom 아님)에서는 파싱 함수를 직접 검증.
+describe("parseAutoScrollById", () => {
+  it("유효한 JSON 객체는 그대로 파싱된다", () => {
+    expect(parseAutoScrollById(JSON.stringify({ svc1: false, svc2: true }))).toEqual({
+      svc1: false,
+      svc2: true,
+    });
+  });
+
+  it("저장된 값이 없으면(null) 빈 객체", () => {
+    expect(parseAutoScrollById(null)).toEqual({});
+  });
+
+  it("깨진 JSON 이면 빈 객체", () => {
+    expect(parseAutoScrollById("{not valid json")).toEqual({});
+  });
+
+  it("객체가 아닌 JSON(배열/원시값)이면 빈 객체", () => {
+    expect(parseAutoScrollById("[1,2,3]")).toEqual({});
+    expect(parseAutoScrollById("42")).toEqual({});
+    expect(parseAutoScrollById("null")).toEqual({});
+  });
+
+  it("boolean 이 아닌 값을 가진 필드는 걸러낸다", () => {
+    expect(parseAutoScrollById(JSON.stringify({ svc1: false, svc2: "yes", svc3: 1 }))).toEqual({
+      svc1: false,
+    });
   });
 });
